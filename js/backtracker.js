@@ -95,8 +95,8 @@ const BacktrackerAlgorithm = (() => {
       const [courseCode, sem] = key.split('|');
       const semester = parseInt(sem);
 
-      const isSpecial = ['el', 'counselling', 'majorproject', 'placements'].includes(courseCode.toLowerCase());
-      if (isSpecial) continue;
+      const isUnschedulable = ['majorproject', 'placements'].includes(courseCode.toLowerCase());
+      if (isUnschedulable) return;
 
       const subject = data.subjects.find(s => s.code === courseCode && s.semester === semester);
       if (!subject) continue;
@@ -139,8 +139,8 @@ const BacktrackerAlgorithm = (() => {
       curr.courses.forEach(course => {
         if (course.is_elective) return;
 
-        const isSpecial = ['el', 'counselling', 'majorproject', 'placements'].includes(course.course_id.toLowerCase());
-        if (isSpecial) return;
+        const isUnschedulable = ['majorproject', 'placements'].includes(course.course_id.toLowerCase());
+        if (isUnschedulable) return;
 
         const subject = data.subjects.find(s => s.code === course.course_id && s.branchId === sec.branchId && s.semester === sec.semester);
         if (!subject) return;
@@ -168,8 +168,8 @@ const BacktrackerAlgorithm = (() => {
       curr.courses.forEach(course => {
         if (course.is_elective) return;
 
-        const isSpecial = ['el', 'counselling', 'majorproject', 'placements'].includes(course.course_id.toLowerCase());
-        if (isSpecial) return;
+        const isUnschedulable = ['majorproject', 'placements'].includes(course.course_id.toLowerCase());
+        if (isUnschedulable) return;
 
         const subject = data.subjects.find(s => s.code === course.course_id && s.branchId === sec.branchId && s.semester === sec.semester);
         if (!subject) return;

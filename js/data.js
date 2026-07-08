@@ -519,15 +519,20 @@ const TimetableData = (() => {
 
             const exists = subjects.some(s => s.code === courseId && s.branchId === branchId && s.semester === sem);
             if (!exists) {
-              const hasLab = courseDetails.lab_hours > 0;
-              const theorySlots = courseDetails.theory_hours !== undefined ? courseDetails.theory_hours : (hasLab ? 3 : courseDetails.credits);
-              const labSessions = courseDetails.lab_hours !== undefined ? Math.ceil(courseDetails.lab_hours / 2) : 0;
+              // Read directly from JSON — no fallbacks that could override 0 values
+              const theoryHours = typeof courseDetails.theory_hours === 'number' ? courseDetails.theory_hours : 0;
+              const labHours = typeof courseDetails.lab_hours === 'number' ? courseDetails.lab_hours : 0;
+              const hasLab = labHours > 0;
+              const theorySlots = theoryHours;
+              const labSessions = labHours > 0 ? Math.ceil(labHours / 2) : 0;
+              // Credits read exactly from JSON — 0 stays 0, no coercion
+              const credits = typeof courseDetails.credits === 'number' ? courseDetails.credits : 0;
 
               const newSub = {
                 id: `SUB_${courseId}_${branchId}_${sem}`,
                 name: courseDetails.name,
                 code: courseDetails.id,
-                credits: courseDetails.credits,
+                credits: credits,
                 isLab: hasLab,
                 branchId: branchId,
                 semester: sem,
