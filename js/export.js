@@ -60,9 +60,12 @@ const TimetableExport = (() => {
           row.push('(Lab cont.)');
         } else {
           const subject = data.subjects.find(s => s.id === cell.subjectId);
-          const teacher = data.teachers.find(t => t.id === cell.teacherId);
+          const teacher = cell.teacherId ? data.teachers.find(t => t.id === cell.teacherId) : null;
+          const room = cell.roomId ? data.rooms.find(r => r.id === cell.roomId) : null;
           const typeLabel = cell.type === 'lab' ? ' [LAB]' : '';
-          row.push(`${subject?.code || '?'}${typeLabel} - ${teacher?.name || '?'}`);
+          const teacherPart = teacher ? ` - ${teacher.name}` : '';
+          const roomPart = room ? ` [${room.id}]` : '';
+          row.push(`${subject?.code || ''}${typeLabel}${teacherPart}${roomPart}`);
         }
       }
 
@@ -239,12 +242,14 @@ const TimetableExport = (() => {
           tableHTML += '<td class="lab-cont-cell">↑ Lab</td>';
         } else {
           const subject = data.subjects.find(s => s.id === cell.subjectId);
-          const teacher = data.teachers.find(t => t.id === cell.teacherId);
+          const teacher = cell.teacherId ? data.teachers.find(t => t.id === cell.teacherId) : null;
+          const room = cell.roomId ? data.rooms.find(r => r.id === cell.roomId) : null;
           const cellClass = cell.type === 'lab' ? 'lab-cell' : 'theory-cell';
           tableHTML += `<td class="${cellClass}">
-            <strong>${subject?.code || '?'}</strong>${cell.type === 'lab' ? ' 🔬' : ''}
+            <strong>${subject?.code || ''}</strong>${cell.type === 'lab' ? ' 🔬' : ''}
             <br><small>${subject?.name || ''}</small>
-            <br><em>${teacher?.name || '?'}</em>
+            ${teacher ? `<br><em>${teacher.name}</em>` : ''}
+            ${room ? `<br><span style="font-size:9px;color:#8f4c2e;font-weight:600;">${room.id}</span>` : ''}
           </td>`;
         }
       }
@@ -435,9 +440,15 @@ const TimetableExport = (() => {
           html += '<td class="pv-labcont">↑</td>';
         } else {
           const subject = data.subjects.find(s => s.id === cell.subjectId);
-          const teacher = data.teachers.find(t => t.id === cell.teacherId);
+          const teacher = cell.teacherId ? data.teachers.find(t => t.id === cell.teacherId) : null;
+          const room = cell.roomId ? data.rooms.find(r => r.id === cell.roomId) : null;
           const cls = cell.type === 'lab' ? 'pv-lab' : 'pv-theory';
-          html += `<td class="${cls}"><strong>${subject?.code || '?'}</strong><br><small>${teacher?.name || '?'}</small></td>`;
+          html += `<td class="${cls}">
+            <strong>${subject?.code || ''}</strong>
+            ${cell.type === 'lab' ? ' 🔬' : ''}
+            <br><small>${teacher?.name || ''}</small>
+            ${room ? `<br><span style="font-size:9px;color:#8f4c2e;font-weight:600;">${room.id}</span>` : ''}
+          </td>`;
         }
       }
 

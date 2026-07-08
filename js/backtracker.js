@@ -75,8 +75,8 @@ const BacktrackerAlgorithm = (() => {
     const tasks = [];
 
     // Map course_id -> is_elective
-    const electiveGroupMap = {}; // courseCode|semester -> [secId, ...]
-    
+    const electiveGroupMap = {};
+
     data.sections.forEach(sec => {
       const curr = TimetableData.getCurriculumForSection(sec.jsonId, sec.semester);
       if (!curr) return;
@@ -90,13 +90,18 @@ const BacktrackerAlgorithm = (() => {
       });
     });
 
-    // Add Elective tasks (Synchronized)
+    // Add Elective tasks (Synchronized theory + per-section lab if applicable)
     for (const [key, sectionIds] of Object.entries(electiveGroupMap)) {
       const [courseCode, sem] = key.split('|');
       const semester = parseInt(sem);
+
+      const isUnschedulable = ['majorproject', 'placements'].includes(courseCode.toLowerCase());
+      if (isUnschedulable) return;
+
       const subject = data.subjects.find(s => s.code === courseCode && s.semester === semester);
       if (!subject) continue;
 
+      // Theory slots (synchronized across all sections)
       for (let i = 0; i < subject.theorySlots; i++) {
         tasks.push({
           type: 'elective',
@@ -107,15 +112,36 @@ const BacktrackerAlgorithm = (() => {
           slotsNeeded: 1
         });
       }
+
+      // Lab slots — per section, no teacher/room for elective labs
+      if (subject.labSessions > 0) {
+        for (const secId of sectionIds) {
+          const teacherId = data.sectionTeachers[`${secId}|${courseCode}`] || null;
+          for (let i = 0; i < subject.labSessions; i++) {
+            tasks.push({
+              type: 'lab',
+              sectionId: secId,
+              courseCode: courseCode,
+              teacherId: teacherId,
+              subjectId: subject.id,
+              duration: 2
+            });
+          }
+        }
+      }
     }
 
-    // Add Lab tasks
+    // Add Lab tasks (non-elective, non-special)
     data.sections.forEach(sec => {
       const curr = TimetableData.getCurriculumForSection(sec.jsonId, sec.semester);
       if (!curr) return;
 
       curr.courses.forEach(course => {
-        if (course.is_elective) return; // Electives already added
+        if (course.is_elective) return;
+
+        const isUnschedulable = ['majorproject', 'placements'].includes(course.course_id.toLowerCase());
+        if (isUnschedulable) return;
+
         const subject = data.subjects.find(s => s.code === course.course_id && s.branchId === sec.branchId && s.semester === sec.semester);
         if (!subject) return;
 
@@ -134,13 +160,17 @@ const BacktrackerAlgorithm = (() => {
       });
     });
 
-    // Add Regular Theory tasks
+    // Add Regular Theory tasks (non-elective, non-special)
     data.sections.forEach(sec => {
       const curr = TimetableData.getCurriculumForSection(sec.jsonId, sec.semester);
       if (!curr) return;
 
       curr.courses.forEach(course => {
-        if (course.is_elective) return; // Electives already added
+        if (course.is_elective) return;
+
+        const isUnschedulable = ['majorproject', 'placements'].includes(course.course_id.toLowerCase());
+        if (isUnschedulable) return;
+
         const subject = data.subjects.find(s => s.code === course.course_id && s.branchId === sec.branchId && s.semester === sec.semester);
         if (!subject) return;
 
@@ -158,7 +188,6 @@ const BacktrackerAlgorithm = (() => {
         }
       });
     });
-
     // Helper functions for constraints checking
     function isElectiveSlotPossible(task, day, slot) {
       for (const secId of task.sections) {
@@ -171,18 +200,12 @@ const BacktrackerAlgorithm = (() => {
 
     function isLabSlotPossible(task, day, slot, roomId) {
       if (slot + 1 >= data.teachingSlots) return false;
-      
-      // Check section free
       if (sectionBusy[task.sectionId][day][slot] || sectionBusy[task.sectionId][day][slot + 1]) return false;
-
-      // Check teacher free (if assigned)
       if (task.teacherId) {
         if (teacherBusy[task.teacherId][day][slot] || teacherBusy[task.teacherId][day][slot + 1]) return false;
+        if (roomBusy[roomId][day][slot] || roomBusy[roomId][day][slot + 1]) return false;
       }
-
-      // Check room free
-      if (roomBusy[roomId][day][slot] || roomBusy[roomId][day][slot + 1]) return false;
-
+      // No teacher = no room needed, only check section is free (already done above)
       return true;
     }
 
@@ -273,29 +296,29 @@ const BacktrackerAlgorithm = (() => {
 
     function tryPlaceLab(task, day, slot, roomId) {
       const secId = task.sectionId;
+      const assignedRoom = task.teacherId ? roomId : null;
       timetable[secId][day][slot] = {
         subjectId: task.subjectId,
         teacherId: task.teacherId,
-        roomId: roomId,
+        roomId: assignedRoom,
         type: 'lab'
       };
       timetable[secId][day][slot + 1] = {
         subjectId: task.subjectId,
         teacherId: task.teacherId,
-        roomId: roomId,
+        roomId: assignedRoom,
         type: 'lab_cont'
       };
-
       sectionBusy[secId][day][slot] = true;
       sectionBusy[secId][day][slot + 1] = true;
-
       if (task.teacherId) {
         teacherBusy[task.teacherId][day][slot] = true;
         teacherBusy[task.teacherId][day][slot + 1] = true;
       }
-
-      roomBusy[roomId][day][slot] = true;
-      roomBusy[roomId][day][slot + 1] = true;
+      if (assignedRoom) {
+        roomBusy[assignedRoom][day][slot] = true;
+        roomBusy[assignedRoom][day][slot + 1] = true;
+      }
       return true;
     }
 
@@ -318,115 +341,146 @@ const BacktrackerAlgorithm = (() => {
 
     function tryPlaceTheory(task, day, slot, roomId) {
       const secId = task.sectionId;
+      // Only assign a room if a teacher is also assigned
+      const assignedRoom = task.teacherId ? roomId : null;
       timetable[secId][day][slot] = {
         subjectId: task.subjectId,
         teacherId: task.teacherId,
-        roomId: roomId,
+        roomId: assignedRoom,
         type: 'theory'
       };
-
       sectionBusy[secId][day][slot] = true;
-
-      if (task.teacherId) {
-        teacherBusy[task.teacherId][day][slot] = true;
-      }
-
-      if (roomId) {
-        roomBusy[roomId][day][slot] = true;
-      }
+      if (task.teacherId) teacherBusy[task.teacherId][day][slot] = true;
+      if (assignedRoom) roomBusy[assignedRoom][day][slot] = true;
       return true;
-    }
-
-    function undoPlaceTheory(task, day, slot, roomId) {
-      const secId = task.sectionId;
-      timetable[secId][day][slot] = null;
-
-      sectionBusy[secId][day][slot] = false;
-
-      if (task.teacherId) {
-        teacherBusy[task.teacherId][day][slot] = false;
-      }
-
-      if (roomId) {
-        roomBusy[roomId][day][slot] = false;
-      }
     }
 
     // Backtracking Search Loop
     let stepCount = 0;
     const maxSteps = options.maxSteps || 50000;
+    
+    // Returns days sorted by how many classes that section already has that day
+// — days with fewer classes come first, spreading load across the week
+    function getDayOrderForSection(sectionId, timetable, numDays) {
+      const counts = Array(numDays).fill(0);
 
-    async function solve(taskIndex) {
-      if (taskIndex >= tasks.length) {
-        return true; // Complete success!
-      }
-
-      if (shouldStop) {
-        return false;
-      }
-
-      stepCount++;
-      if (stepCount > maxSteps) {
-        return false;
-      }
-
-      // Progress reporting
-      if (stepCount % 200 === 0) {
-        await new Promise(resolve => setTimeout(resolve, 0));
-        if (onProgress) {
-          onProgress(taskIndex, tasks.length, 0);
-        }
-      }
-
-      const task = tasks[taskIndex];
-
-      if (task.type === 'elective') {
-        // Try slots for elective
-        for (let d = 0; d < data.days.length; d++) {
-          for (let s = 0; s < data.teachingSlots; s++) {
-            if (isElectiveSlotPossible(task, d, s)) {
-              tryPlaceElective(task, d, s);
-              if (forwardCheckValid(taskIndex)) {
-                if (await solve(taskIndex + 1)) return true;
-              }
-              undoPlaceElective(task, d, s);
-            }
-          }
-        }
-      } else if (task.type === 'lab') {
-        const eligibleLabs = getEligibleLabs(task.courseCode, data.sections.find(s => s.id === task.sectionId).branchId);
-        // Labs must start at 0, 2, or 4
-        for (let d = 0; d < data.days.length; d++) {
-          for (const s of [0, 2, 4]) {
-            for (const room of eligibleLabs) {
-              if (isLabSlotPossible(task, d, s, room.id)) {
-                tryPlaceLab(task, d, s, room.id);
-                if (forwardCheckValid(taskIndex)) {
-                  if (await solve(taskIndex + 1)) return true;
-                }
-                undoPlaceLab(task, d, s, room.id);
-              }
-            }
-          }
-        }
-      } else if (task.type === 'theory') {
-        const roomId = sectionClassrooms[task.sectionId];
-        for (let d = 0; d < data.days.length; d++) {
-          for (let s = 0; s < data.teachingSlots; s++) {
-            if (isTheorySlotPossible(task, d, s, roomId)) {
-              tryPlaceTheory(task, d, s, roomId);
-              if (forwardCheckValid(taskIndex)) {
-                if (await solve(taskIndex + 1)) return true;
-              }
-              undoPlaceTheory(task, d, s, roomId);
-            }
+      // Count existing assignments for this section on each day
+      const grid = timetable[sectionId];
+      if (grid) {
+        for (let d = 0; d < numDays; d++) {
+          for (let s = 0; s < grid[d].length; s++) {
+            if (grid[d][s] !== null) counts[d]++;
           }
         }
       }
 
-      return false;
+      // Return day indices sorted ascending by count (least loaded day first)
+      return Array.from({ length: numDays }, (_, i) => i)
+        .sort((a, b) => counts[a] - counts[b]);
     }
 
+    async function solve(taskIndex) {
+      for (let i = 0; i < tasks.length; i++) {
+        if (shouldStop) return false;
+
+        if (i % 50 === 0) {
+          await new Promise(resolve => setTimeout(resolve, 0));
+          if (onProgress) onProgress(i, tasks.length, 0);
+        }
+
+        const task = tasks[i];
+        let placed = false;
+
+        if (task.type === 'elective') {
+          // Spread-aware day order — try days with fewest assignments first
+          const dayOrder = getDayOrderForSection(task.sections[0], timetable, data.days.length);
+          outer: for (const d of dayOrder) {
+            for (let s = 0; s < data.teachingSlots; s++) {
+              if (isElectiveSlotPossible(task, d, s)) {
+                tryPlaceElective(task, d, s);
+                placed = true;
+                break outer;
+              }
+            }
+          }
+
+        } else if (task.type === 'lab') {
+          const sec = data.sections.find(s => s.id === task.sectionId);
+          const dayOrder = getDayOrderForSection(task.sectionId, timetable, data.days.length);
+
+          if (task.teacherId) {
+            // Has teacher — need a real room
+            const eligibleLabs = getEligibleLabs(task.courseCode, sec.branchId);
+            outer: for (const d of dayOrder) {
+              for (const s of [0, 2, 4]) {
+                for (const room of eligibleLabs) {
+                  if (isLabSlotPossible(task, d, s, room.id)) {
+                    tryPlaceLab(task, d, s, room.id);
+                    placed = true;
+                    break outer;
+                  }
+                }
+              }
+            }
+            // Fallback: any lab
+            if (!placed) {
+              const allLabs = data.rooms.filter(r => r.type === 'lab');
+              outer2: for (let d = 0; d < data.days.length; d++) {
+                for (const s of [0, 2, 4]) {
+                  for (const room of allLabs) {
+                    if (isLabSlotPossible(task, d, s, room.id)) {
+                      tryPlaceLab(task, d, s, room.id);
+                      placed = true;
+                      break outer2;
+                    }
+                  }
+                }
+              }
+            }
+          } else {
+            // No teacher (e.g. elective lab like XX115XIX) — just find free section slots
+            console.log(`Placing no-teacher lab for ${task.courseCode} section ${task.sectionId}`);
+            outer: for (const d of dayOrder) {
+              for (const s of [0, 2, 4]) {
+                const possible = isLabSlotPossible(task, d, s, null);
+                console.log(`  day ${d} slot ${s}: possible=${possible}, busy0=${sectionBusy[task.sectionId][d][s]}, busy1=${sectionBusy[task.sectionId][d][s+1]}`);
+                if (possible) {
+                  tryPlaceLab(task, d, s, null);
+                  placed = true;
+                  break outer;
+                }
+              }
+            }
+            console.log(`Result for ${task.courseCode} ${task.sectionId}: placed=${placed}`);
+          }
+        } else if (task.type === 'theory') {
+          const roomId = sectionClassrooms[task.sectionId];
+          const dayOrder = getDayOrderForSection(task.sectionId, timetable, data.days.length);
+          outer: for (const d of dayOrder) {
+            for (let s = 0; s < data.teachingSlots; s++) {
+              if (isTheorySlotPossible(task, d, s, roomId)) {
+                tryPlaceTheory(task, d, s, roomId);
+                placed = true;
+                break outer;
+              }
+            }
+          }
+        }
+
+        stepCount++;
+        if (!placed) {
+          console.warn(`Could not place task ${i}: ${task.type} ${task.courseCode || task.subjectId}`);
+        }
+      }
+
+      return true;
+    }
+    // After all tasks are pushed, sort: labs first, then theory
+    // This ensures 2-slot lab blocks are claimed before theory fills the grid
+    tasks.sort((a, b) => {
+      const priority = { lab: 0, elective: 1, theory: 2 };
+      return (priority[a.type] ?? 2) - (priority[b.type] ?? 2);
+    });
     const success = await solve(0);
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
 

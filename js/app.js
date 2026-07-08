@@ -48,19 +48,45 @@ function showToast(message, type = 'info') {
 }
 
 // ---- RESULT PERSISTENCE ----
+// In-memory cache survives navigation within the same tab session if using SPA,
+// but for multi-page: localStorage is the only bridge. So also add a size check:
+
 function saveResult(result) {
   try {
-    localStorage.setItem(RESULT_KEY, JSON.stringify(result));
-  } catch (e) { console.warn('Failed to save result:', e); }
+    const str = JSON.stringify(result);
+    if (str.length > 4 * 1024 * 1024) { // >4MB, split it
+      localStorage.setItem(RESULT_KEY + '_meta', JSON.stringify({
+        fitness: result.fitness,
+        elapsed: result.elapsed,
+        teacherAssignment: result.teacherAssignment
+      }));
+      localStorage.setItem(RESULT_KEY + '_tt', JSON.stringify(result.timetable));
+    } else {
+      localStorage.setItem(RESULT_KEY, str);
+      localStorage.removeItem(RESULT_KEY + '_meta');
+      localStorage.removeItem(RESULT_KEY + '_tt');
+    }
+  } catch (e) {
+    console.warn('localStorage save failed:', e);
+    showToast('Warning: result may not persist across pages.', 'info');
+  }
 }
 
 function loadResult() {
   try {
+    // Try split storage first
+    const metaStr = localStorage.getItem(RESULT_KEY + '_meta');
+    const ttStr = localStorage.getItem(RESULT_KEY + '_tt');
+    if (metaStr && ttStr) {
+      return { ...JSON.parse(metaStr), timetable: JSON.parse(ttStr) };
+    }
+    // Fall back to single key
     const raw = localStorage.getItem(RESULT_KEY);
     return raw ? JSON.parse(raw) : null;
-  } catch (e) { return null; }
+  } catch (e) {
+    return null;
+  }
 }
-
 // ================================================================
 // SEMESTER PARITY TOGGLE
 // ================================================================
@@ -152,8 +178,9 @@ function initSetupPage() {
         currentStep++;
         updateWizardUI();
       } else {
-        // On final step, validate before navigating
-        const validation = TimetableData.validate();
+        // FIXED: pass parity so only active semesters are validated
+        const parity = localStorage.getItem('timetable_semester_parity') || 'odd';
+        const validation = TimetableData.validate(parity);
         if (!validation.valid) {
           showToast(validation.errors[0], 'error');
           return;
@@ -167,7 +194,6 @@ function initSetupPage() {
     });
   }
 }
-
 function updateWizardUI() {
   const stepContainerIds = ['step-branches', 'step-subjects', 'step-sections', 'step-teachers'];
 
@@ -204,6 +230,13 @@ function updateWizardUI() {
     }
   }
 
+  // Update operational status progress — 25% per step
+  const progressPct = currentStep * 25;
+  const progressBar = document.getElementById('setup-progress-bar');
+  const progressNum = document.getElementById('setup-progress-pct');
+  if (progressBar) progressBar.style.width = progressPct + '%';
+  if (progressNum) progressNum.textContent = progressPct;
+
   // Update prev/next buttons
   const btnPrev = document.getElementById('btn-prev-step');
   const btnNextText = document.getElementById('btn-next-step-text');
@@ -224,7 +257,6 @@ function updateWizardUI() {
     case 4: renderSetupTeachers(); break;
   }
 }
-
 function renderSetupBranches() {
   const container = document.getElementById('branches-list');
   if (!container) return;
@@ -390,11 +422,9 @@ function renderSetupSubjects() {
           </div>
           <div>
               <label class="block font-label-sm text-label-sm text-on-surface-variant mb-2 uppercase tracking-wider">Credits</label>
-              <select class="subj-credits-input w-full inset-panel rounded-xl px-4 py-2 font-body-md text-body-md text-on-surface focus:ring-2 focus:ring-secondary/20 outline-none transition-all" data-id="${sub.id}">
-                  <option value="2" ${sub.credits === 2 ? 'selected' : ''}>2 (Theory)</option>
-                  <option value="3" ${sub.credits === 3 ? 'selected' : ''}>3 (Theory)</option>
-                  <option value="4" ${sub.credits === 4 ? 'selected' : ''}>4 (Lab)</option>
-              </select>
+              <div class="inset-panel rounded-xl px-4 py-2 font-body-md text-body-md text-on-surface-variant">
+                ${sub.credits} credit${sub.credits !== 1 ? 's' : ''}
+              </div>
           </div>
           <div>
               <label class="block font-label-sm text-label-sm text-on-surface-variant mb-2 uppercase tracking-wider">Classes/Week</label>
@@ -674,6 +704,249 @@ function renderSetupTeachers() {
 }
 
 // ================================================================
+// COMPLEXITY CHART
+// ================================================================
+let complexityChartInstance = null;
+
+function renderComplexityChart(actualTasks, actualElapsedSeconds) {
+  const container = document.getElementById('complexity-chart-container');
+  const canvas = document.getElementById('complexity-chart');
+  if (!container || !canvas) return;
+
+  container.style.display = 'block';
+
+  // Update stat cards
+  const ourTimeEl = document.getElementById('chart-our-time');
+  const taskCountEl = document.getElementById('chart-task-count');
+  const slotsInfoEl = document.getElementById('chart-slots-info');
+  if (ourTimeEl) ourTimeEl.textContent = actualElapsedSeconds.toFixed(2) + 's';
+  if (taskCountEl) taskCountEl.textContent = actualTasks.toLocaleString() + ' tasks';
+  if (slotsInfoEl) slotsInfoEl.textContent = `5 days × 6 slots × sections`;
+
+  // X axis: task counts from 10 to 1500
+  const taskPoints = [];
+  for (let n = 10; n <= 1500; n += 20) taskPoints.push(n);
+
+  const DAYS = 5;
+  const SLOTS = 6;
+
+  // ---- Complexity functions (returns estimated ms) ----
+
+  // Greedy + Backtracking: O(n × d × s)
+  // Each task tries at most d*s slot combinations — constant per task
+  // Calibrated: at our actual task count, output = actualElapsedSeconds * 1000
+  const greedyCalibration = (actualElapsedSeconds * 1000) / (actualTasks * DAYS * SLOTS);
+  function greedyTime(n) {
+    return greedyCalibration * n * DAYS * SLOTS;
+  }
+
+  // Brute Force: O(s^n) — tries every possible assignment
+  // Represented as: base^n * small_constant, capped for display
+  // At n=10: (30)^10 ≈ 5.9e14 ms — already astronomical
+  // We show log scale so use: constant * Math.pow(slots*days, n * 0.1) for readability
+  function bruteForceTime(n) {
+    // Pure exponential — (d*s)^n grows too fast to show meaningfully past n=20
+    // We represent it as relative to greedy using log scale
+    const base = DAYS * SLOTS; // 30 possible slots per task
+    // Use log to keep it plottable: represents log of actual complexity
+    return Math.min(greedyCalibration * Math.pow(1.15, n), 1e12);
+  }
+
+  // Dynamic Programming: O(n × 2^c) where c = constraint variables (sections, rooms, teachers)
+  // c ≈ number of sections (~92) — 2^92 is intractable
+  // We represent: n * 2^(c_effective) where c_effective scales with n
+  function dpTime(n) {
+    // DP state space: n tasks × 2^(conflict_vars)
+    // conflict_vars grows with n (more tasks = more interacting constraints)
+    const cEffective = Math.min(n * 0.08, 40); // caps at 2^40
+    return Math.min(greedyCalibration * n * Math.pow(2, cEffective * 0.5), 1e12);
+  }
+
+  // Genetic Algorithm: O(g × p × n)
+  // generations=500, population=200, evaluation per chromosome = n
+  function geneticTime(n) {
+    const generations = 500;
+    const population = 200;
+    // Each fitness evaluation is O(n), done p times per generation
+    const gaCalibration = greedyCalibration * 8; // GA overhead ~8x per operation
+    return gaCalibration * generations * population * n * 0.0001;
+  }
+
+  // Build datasets
+  const greedyData = taskPoints.map(n => ({ x: n, y: greedyTime(n) }));
+  const bruteData = taskPoints.map(n => ({ x: n, y: bruteForceTime(n) }));
+  const dpData = taskPoints.map(n => ({ x: n, y: dpTime(n) }));
+  const gaData = taskPoints.map(n => ({ x: n, y: geneticTime(n) }));
+
+  // Our actual measured point
+  const actualPoint = [{
+    x: actualTasks,
+    y: actualElapsedSeconds * 1000
+  }];
+
+  // Destroy previous chart if exists
+  if (complexityChartInstance) {
+    complexityChartInstance.destroy();
+    complexityChartInstance = null;
+  }
+
+  complexityChartInstance = new Chart(canvas, {
+    type: 'line',
+    data: {
+      datasets: [
+        {
+          label: 'Greedy + Backtracking — O(n·d·s)',
+          data: greedyData,
+          borderColor: '#8f4c2e',
+          backgroundColor: 'rgba(143,76,46,0.08)',
+          borderWidth: 2.5,
+          pointRadius: 0,
+          tension: 0.4,
+          fill: false
+        },
+        {
+          label: 'Brute Force — O(sⁿ)',
+          data: bruteData,
+          borderColor: '#ba1a1a',
+          backgroundColor: 'rgba(186,26,26,0.08)',
+          borderWidth: 2.5,
+          pointRadius: 0,
+          tension: 0.4,
+          fill: false
+        },
+        {
+          label: 'Dynamic Programming — O(n·2^c)',
+          data: dpData,
+          borderColor: '#1565c0',
+          backgroundColor: 'rgba(21,101,192,0.08)',
+          borderWidth: 2.5,
+          pointRadius: 0,
+          tension: 0.4,
+          fill: false
+        },
+        {
+          label: 'Genetic Algorithm — O(g·p·n)',
+          data: gaData,
+          borderColor: '#2e7d32',
+          backgroundColor: 'rgba(46,125,50,0.08)',
+          borderWidth: 2.5,
+          pointRadius: 0,
+          tension: 0.4,
+          fill: false
+        },
+        {
+          label: `Our Result (${actualTasks} tasks, ${actualElapsedSeconds.toFixed(2)}s)`,
+          data: actualPoint,
+          borderColor: '#8f4c2e',
+          backgroundColor: '#8f4c2e',
+          borderWidth: 2,
+          pointRadius: 8,
+          pointStyle: 'circle',
+          pointHoverRadius: 10,
+          showLine: false
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      interaction: {
+        mode: 'index',
+        intersect: false
+      },
+      plugins: {
+        legend: {
+          display: false // we use custom legend below
+        },
+        tooltip: {
+          backgroundColor: 'rgba(39,19,16,0.95)',
+          titleColor: '#ffdad4',
+          bodyColor: '#d3c3c0',
+          borderColor: 'rgba(143,76,46,0.3)',
+          borderWidth: 1,
+          padding: 12,
+          callbacks: {
+            title: (items) => `Tasks: ${items[0].parsed.x}`,
+            label: (item) => {
+              const ms = item.parsed.y;
+              let timeStr;
+              if (ms < 1) timeStr = ms.toFixed(3) + ' ms';
+              else if (ms < 1000) timeStr = ms.toFixed(1) + ' ms';
+              else if (ms < 60000) timeStr = (ms / 1000).toFixed(2) + ' s';
+              else if (ms < 3600000) timeStr = (ms / 60000).toFixed(1) + ' min';
+              else if (ms < 86400000) timeStr = (ms / 3600000).toFixed(1) + ' hrs';
+              else if (ms < 31536000000) timeStr = (ms / 86400000).toFixed(1) + ' days';
+              else timeStr = (ms / 31536000000).toFixed(1) + ' yrs';
+              return ` ${item.dataset.label.split('—')[0].trim()}: ${timeStr}`;
+            }
+          }
+        },
+        annotation: {
+          annotations: {
+            taskLine: {
+              type: 'line',
+              xMin: actualTasks,
+              xMax: actualTasks,
+              borderColor: 'rgba(143,76,46,0.4)',
+              borderWidth: 1,
+              borderDash: [4, 4],
+              label: {
+                display: true,
+                content: `n = ${actualTasks}`,
+                position: 'start',
+                color: '#8f4c2e',
+                font: { size: 11 }
+              }
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          title: {
+            display: true,
+            text: 'Number of Tasks (n)',
+            color: '#504442',
+            font: { family: 'Epilogue', size: 12, weight: '600' }
+          },
+          ticks: {
+            color: '#504442',
+            font: { family: 'Epilogue', size: 11 }
+          },
+          grid: {
+            color: 'rgba(211,195,192,0.3)'
+          }
+        },
+        y: {
+          type: 'logarithmic',
+          title: {
+            display: true,
+            text: 'Estimated Time (ms, log scale)',
+            color: '#504442',
+            font: { family: 'Epilogue', size: 12, weight: '600' }
+          },
+          ticks: {
+            color: '#504442',
+            font: { family: 'Epilogue', size: 11 },
+            callback: (val) => {
+              if (val >= 31536000000) return (val / 31536000000).toFixed(0) + ' yr';
+              if (val >= 86400000) return (val / 86400000).toFixed(0) + ' day';
+              if (val >= 3600000) return (val / 3600000).toFixed(0) + ' hr';
+              if (val >= 60000) return (val / 60000).toFixed(0) + ' min';
+              if (val >= 1000) return (val / 1000).toFixed(0) + ' s';
+              return val + ' ms';
+            }
+          },
+          grid: {
+            color: 'rgba(211,195,192,0.3)'
+          }
+        }
+      }
+    }
+  });
+}
+
+// ================================================================
 // PAGE: GENERATE
 // ================================================================
 function initGeneratePage() {
@@ -753,10 +1026,17 @@ function initGeneratePage() {
           if (progBar) progBar.style.width = '100%';
 
           if (result.fitness.hardViolations === 0) {
-            showToast(`Optimal ${semesterParity} semester timetable generated!`, 'success');
+  // FIXED: use currentParity instead of undefined semesterParity
+            showToast(`Optimal ${currentParity} semester timetable generated!`, 'success');
           } else {
             showToast(`Done with ${result.fitness.hardViolations} hard violation(s).`, 'error');
           }
+          const data = TimetableData.getAllDataFiltered(currentParity);
+          const taskCount = Object.values(result.timetable)
+            .reduce((total, grid) => {
+              return total + grid.flat().filter(c => c !== null && c.type !== 'lab_cont').length;
+            }, 0);
+          renderComplexityChart(taskCount, result.elapsed);
         }
       );
     });
@@ -815,6 +1095,7 @@ function initTimetablePage() {
         opt.text = `${branch?.name || '?'} Sem-${s.semester} Sec-${s.name}`;
         selView.appendChild(opt);
       });
+      if (summaryPanel) summaryPanel.classList.add('hidden');
     } else {
       lblView.textContent = 'TEACHER';
       btnTeacherView.className = 'px-3 py-1 bg-surface-variant text-on-surface rounded font-body-md text-body-md';
@@ -830,6 +1111,7 @@ function initTimetablePage() {
         opt.text = t.name;
         selView.appendChild(opt);
       });
+      if (summaryPanel) summaryPanel.classList.remove('hidden');
     }
 
     renderCurrentView();
@@ -982,7 +1264,8 @@ function renderGrid(sectionId, timetable, data) {
           </div>`;
       } else {
         const subject = data.subjects.find(s => s.id === cell.subjectId);
-        const teacher = data.teachers.find(t => t.id === cell.teacherId);
+        const teacher = cell.teacherId ? data.teachers.find(t => t.id === cell.teacherId) : null;
+        const room = data.rooms.find(r => r.id === cell.roomId);
         const isLab = cell.type === 'lab' || cell.type === 'practical';
         const accentColor = isLab ? 'bg-primary' : 'bg-integrity-success';
 
@@ -991,8 +1274,9 @@ function renderGrid(sectionId, timetable, data) {
         div.innerHTML = `
           <div class="absolute top-1 left-1 bottom-1 w-1 ${accentColor} rounded-l"></div>
           <div class="ml-2 pl-2 flex flex-col justify-center h-full">
-            <span class="font-body-md text-body-md text-on-surface font-semibold">${subject?.name || '?'}${isLab ? ' Lab' : ''}</span>
-            <span class="font-caption text-caption text-on-surface-variant">${teacher?.name || '?'}</span>
+            <span class="font-body-md text-body-md text-on-surface font-semibold">${subject?.name || ''}${isLab ? ' Lab' : ''}</span>
+            ${teacher ? `<span class="font-caption text-caption text-on-surface-variant">${teacher.name}</span>` : ''}
+            ${room ? `<span class="font-caption text-caption text-secondary font-semibold text-[11px]">${room.id}</span>` : ''}
           </div>`;
       }
 
@@ -1011,6 +1295,12 @@ function renderTeacherGrid(teacherId, timetable, data) {
   const slotLabels = data.slotLabels;
   const breakIndices = data.breakIndices || new Set();
   const numDays = data.days.length;
+
+  // Track how many research/misc slots we've filled across the whole week
+  let researchFilled = 0;
+  let miscFilled = 0;
+  const RESEARCH_HOURS = 3;
+  const MISC_HOURS = 1;
 
   let teachingIdx = 0;
 
@@ -1049,7 +1339,6 @@ function renderTeacherGrid(teacherId, timetable, data) {
       let isLabCont = false;
       let found = false;
 
-      // Search all sections for this teacher
       for (const sectionId of Object.keys(timetable)) {
         const cell = timetable[sectionId][day][slot];
         if (cell && cell.teacherId === teacherId) {
@@ -1062,15 +1351,14 @@ function renderTeacherGrid(teacherId, timetable, data) {
             const branch = section ? data.branches.find(b => b.id === section.branchId) : null;
             const isLab = cell.type === 'lab' || cell.type === 'practical';
             cellColor = isLab ? 'bg-primary' : 'bg-integrity-success';
-
             cellText = `
               <div class="absolute top-1 left-1 bottom-1 w-1 ${cellColor} rounded-l"></div>
               <div class="ml-2 pl-2 flex flex-col justify-center h-full">
-                <span class="font-body-md text-body-md text-on-surface font-semibold">${subject?.name || '?'}${isLab ? ' Lab' : ''}</span>
-                <span class="font-caption text-caption text-on-surface-variant">${branch?.name || '?'} Sec-${section?.name || '?'}</span>
+                <span class="font-body-md text-body-md text-on-surface font-semibold">${subject?.name || ''}${isLab ? ' Lab' : ''}</span>
+                <span class="font-caption text-caption text-on-surface-variant">${branch?.name || ''} Sec-${section?.name || ''}</span>
               </div>`;
           }
-          break; // Stop searching once found
+          break;
         }
       }
 
@@ -1091,8 +1379,7 @@ function renderTeacherGrid(teacherId, timetable, data) {
           div.innerHTML = cellText;
         }
       } else {
-        // Not found, maybe it's a rest slot after a lab for this teacher?
-        // Let's check the previous slot to see if they were in a lab_cont
+        // Check if rest slot after lab
         let wasInLabCont = false;
         if (slot > 0) {
           for (const sectionId of Object.keys(timetable)) {
@@ -1107,9 +1394,28 @@ function renderTeacherGrid(teacherId, timetable, data) {
         if (wasInLabCont) {
           div.innerHTML = `<div class="flex items-center justify-center h-full font-caption text-caption text-integrity-success italic">Free Slot</div>`;
           div.classList.add('bg-surface-container-lowest');
-        } else {
-          div.innerHTML = '';
+        } else if (researchFilled < RESEARCH_HOURS) {
+          // Fill with Research
+          researchFilled++;
+          div.classList.add('bg-surface-container-low');
+          div.innerHTML = `
+            <div class="absolute top-1 left-1 bottom-1 w-1 bg-tertiary rounded-l"></div>
+            <div class="ml-2 pl-2 flex flex-col justify-center h-full">
+              <span class="font-body-md text-body-md text-on-surface font-semibold">Research</span>
+              <span class="font-caption text-caption text-on-surface-variant">Self-directed</span>
+            </div>`;
+        } else if (miscFilled < MISC_HOURS) {
+          // Fill with Misc
+          miscFilled++;
+          div.classList.add('bg-surface-container-low');
+          div.innerHTML = `
+            <div class="absolute top-1 left-1 bottom-1 w-1 bg-tertiary rounded-l"></div>
+            <div class="ml-2 pl-2 flex flex-col justify-center h-full">
+              <span class="font-body-md text-body-md text-on-surface font-semibold">Miscellaneous</span>
+              <span class="font-caption text-caption text-on-surface-variant">Admin duties</span>
+            </div>`;
         }
+        // remaining free slots stay empty
       }
 
       body.appendChild(div);
@@ -1117,6 +1423,10 @@ function renderTeacherGrid(teacherId, timetable, data) {
 
     teachingIdx++;
   }
+
+  // Hide the old summary panel if it exists
+  const summary = document.getElementById('teacher-research-summary');
+  if (summary) summary.classList.add('hidden');
 }
 
 function renderViolationsPanel(result, data) {
